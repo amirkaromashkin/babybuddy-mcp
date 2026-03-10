@@ -34,7 +34,7 @@ from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -130,7 +130,8 @@ LOGIN_HTML = """\
           justify-content:center;min-height:100vh;padding:20px}}
     .card{{background:#fff;border-radius:16px;padding:40px;
            box-shadow:0 4px 24px rgba(0,0,0,.1);max-width:440px;width:100%}}
-    .logo{{font-size:40px;text-align:center;margin-bottom:8px}}
+    .logo{{text-align:center;margin-bottom:8px}}
+    .logo img{{width:80px;height:80px;border-radius:20%}}
     h1{{text-align:center;font-size:22px;color:#1a202c;margin-bottom:4px}}
     p.sub{{text-align:center;color:#718096;font-size:14px;margin-bottom:28px}}
     label{{display:block;font-size:13px;font-weight:600;color:#4a5568;margin-bottom:6px}}
@@ -150,7 +151,7 @@ LOGIN_HTML = """\
 </head>
 <body>
   <div class="card">
-    <div class="logo">👶</div>
+    <div class="logo"><img src="/icon.png" alt="BabyBuddy MCP Icon"></div>
     <h1>BabyBuddy MCP</h1>
     <p class="sub">Connect your BabyBuddy instance to Claude</p>
     <div class="error">{error_msg}</div>
@@ -311,6 +312,10 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 # Login form — custom routes added to the Starlette app
 # ---------------------------------------------------------------------------
+
+@mcp.custom_route("/icon.png", methods=["GET"])
+async def get_icon(request: Request) -> Response:
+    return FileResponse("icon.png")
 
 @mcp.custom_route("/oauth/login", methods=["GET"])
 async def login_form(request: Request) -> Response:

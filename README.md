@@ -1,6 +1,6 @@
 # BabyBuddy MCP Server
 
-A general-purpose MCP server for any self-hosted [BabyBuddy](https://github.com/babybuddy/babybuddy) instance.
+MCP server for self-hosted [BabyBuddy](https://github.com/babybuddy/babybuddy).
 
 **Transport:** Streamable HTTP (runs on `http://localhost:8080`)
 **Auth:** OAuth 2.1 — users log in with their BabyBuddy URL + API token via a browser form, no config files or hardcoded secrets needed.

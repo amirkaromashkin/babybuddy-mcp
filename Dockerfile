@@ -6,6 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
+COPY icon.png .
 
 # HOST must be 0.0.0.0 to accept traffic inside Cloud Run
 # PORT is injected by Cloud Run at runtime — do not hardcode it here
