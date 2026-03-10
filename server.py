@@ -293,12 +293,17 @@ class BabyBuddyOAuthProvider(
 
 _oauth_provider = BabyBuddyOAuthProvider()
 
+# Ensure metadata URLs are HTTPS (FastMCP / OAuth 2.1 requirement)
+_mcp_url = SERVER_URL
+if _mcp_url.startswith("http://"):
+    _mcp_url = _mcp_url.replace("http://", "https://", 1)
+
 mcp = FastMCP(
     "BabyBuddy",
     auth_server_provider=_oauth_provider,
     auth=AuthSettings(
-        issuer_url=AnyHttpUrl(SERVER_URL),
-        resource_server_url=AnyHttpUrl(SERVER_URL),
+        issuer_url=AnyHttpUrl(_mcp_url),
+        resource_server_url=AnyHttpUrl(_mcp_url),
         client_registration_options=ClientRegistrationOptions(
             enabled=True,
             valid_scopes=["babybuddy"],
