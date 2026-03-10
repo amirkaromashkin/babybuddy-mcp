@@ -109,25 +109,32 @@ The included `Dockerfile` targets Cloud Run. One-time setup then a single deploy
 ### Prerequisites
 
 ```bash
-# Install gcloud CLI if you don't have it: https://cloud.google.com/sdk/docs/install
+# Set your deployment variables
+export BABYBUDDY_INSTANCE_PROJECT_ID="playground-2-489517"
+export BABYBUDDY_INSTANCE_REGION="europe-north1"
+export BABYBUDDY_INSTANCE_URL="https://babybuddy-mcp-191758225341.europe-north1.run.app"
+export BABYBUDDY_INSTANCE_AUTH_TOKEN="83879a020e89c31ea801b40e99faabf70122abdc"
+
+# Login and configure gcloud
 gcloud auth login
-gcloud config set project YOUR_PROJECT_ID
+gcloud config set project $BABYBUDDY_INSTANCE_PROJECT_ID
 ```
 
-### Deploy
+### Deploy to GCP
 
 ```bash
-# From the babybuddy-mcp directory:
 gcloud run deploy babybuddy-mcp \
-  --source . \
-  --region europe-north1 \
+  --project=$BABYBUDDY_INSTANCE_PROJECT_ID \
+  --source=. \
+  --region=$BABYBUDDY_INSTANCE_REGION \
   --allow-unauthenticated \
-  --timeout 3600 \
-  --min-instances 0 \
-  --max-instances 1
+  --timeout=3600 \
+  --min-instances=0 \
+  --max-instances=1 \
+  --set-env-vars="SERVER_URL=$BABYBUDDY_INSTANCE_URL"
 ```
 
-Cloud Run will print your service URL, e.g. `https://babybuddy-mcp-xxxxxxxxxx-lz.a.run.app`.
+Cloud Run will print your service URL, e.g. `https://babybuddy-mcp-191758225341.europe-north1.run.app`.
 
 Then set `SERVER_URL` so OAuth redirects use the correct public URL:
 
