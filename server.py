@@ -325,6 +325,11 @@ async def get_icon(request: Request) -> Response:
 @mcp.custom_route("/oauth/login", methods=["GET"])
 async def login_form(request: Request) -> Response:
     state = request.query_params.get("state", "")
+    # Allow a preview mode for the user to check the UI/Icon 
+    if state == "preview":
+        return HTMLResponse(LOGIN_HTML.format(state="preview", base_url="",
+                                              error_display="none", error_msg=""))
+
     if state not in _pending_auth:
         return HTMLResponse("<h1>Invalid or expired state. Please restart the connection.</h1>", status_code=400)
     return HTMLResponse(LOGIN_HTML.format(state=state, base_url="",
