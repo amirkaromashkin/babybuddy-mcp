@@ -84,24 +84,6 @@ Restart Claude Desktop. On first use a browser window opens to `http://localhost
 
 ---
 
-## OAuth Flow
-
-```
-Claude Desktop ──► MCP server /mcp           (401 + WWW-Authenticate)
-                ──► /.well-known/...          (OAuth metadata discovery)
-                ──► /oauth/authorize          (server returns login URL)
-  Browser       ──► /oauth/login?state=...    (login form)
-  User fills in URL + token, hits Connect
-  Server validates token against BabyBuddy /api/children/
-                ──► redirect_uri?code=...     (back to Claude with auth code)
-Claude Desktop  ──► /oauth/token             (exchange code → access token)
-                ──► /mcp (Bearer token)       (all subsequent requests)
-```
-
-No BabyBuddy configuration needed — the server works with any instance. Multiple users can authenticate independently (each gets their own session).
-
----
-
 ## Deploying to Google Cloud Run
 
 The included `Dockerfile` targets Cloud Run. One-time setup then a single deploy command.
@@ -109,40 +91,25 @@ The included `Dockerfile` targets Cloud Run. One-time setup then a single deploy
 ### Prerequisites
 
 ```bash
-# Set your deployment variables
-export BABYBUDDY_INSTANCE_PROJECT_ID="playground-2-489517"
-export BABYBUDDY_INSTANCE_REGION="europe-north1"
-export BABYBUDDY_INSTANCE_URL="https://babybuddy-mcp-191758225341.europe-north1.run.app"
-export BABYBUDDY_INSTANCE_AUTH_TOKEN="83879a020e89c31ea801b40e99faabf70122abdc"
-
-# Login and configure gcloud
+# Install gcloud CLI if you don't have it: https://cloud.google.com/sdk/docs/install
 gcloud auth login
-gcloud config set project $BABYBUDDY_INSTANCE_PROJECT_ID
+gcloud config set project $PROJECT_ID
+gcloud config set region $GCP_REGION
 ```
 
 ### Deploy to GCP
 
 ```bash
 gcloud run deploy babybuddy-mcp \
-  --project=$BABYBUDDY_INSTANCE_PROJECT_ID \
   --source=. \
-  --region=$BABYBUDDY_INSTANCE_REGION \
   --allow-unauthenticated \
   --timeout=3600 \
-  --min-instances=0 \
+  --min-instances=1 \
   --max-instances=1 \
   --set-env-vars="SERVER_URL=$BABYBUDDY_INSTANCE_URL"
 ```
 
-Cloud Run will print your service URL, e.g. `https://babybuddy-mcp-191758225341.europe-north1.run.app`.
-
-Then set `SERVER_URL` so OAuth redirects use the correct public URL:
-
-```bash
-gcloud run services update babybuddy-mcp \
-  --region europe-north1 \
-  --set-env-vars SERVER_URL=https://babybuddy-mcp-xxxxxxxxxx-lz.a.run.app
-```
+Cloud Run will print your service URL, e.g. `https://babybuddy-mcp-1234567890.europe-north1.run.app`.
 
 ### Update Claude Desktop config
 
@@ -151,7 +118,7 @@ gcloud run services update babybuddy-mcp \
   "mcpServers": {
     "babybuddy": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://babybuddy-mcp-xxxxxxxxxx-lz.a.run.app/mcp"]
+      "args": ["-y", "mcp-remote", "https://babybuddy-mcp-1234567890.europe-north1.run.app/mcp"]
     }
   }
 }
@@ -160,11 +127,27 @@ gcloud run services update babybuddy-mcp \
 ### Subsequent deploys
 
 ```bash
-gcloud run deploy babybuddy-mcp --source . --region europe-north1
+gcloud run deploy babybuddy-mcp --source . --region $GCP_REGION
 ```
 
 ---
 
-## Persistent Storage
+## Persistent Login (Always-on)
 
-By default tokens are in-memory and lost on restart (Cloud Run scales to zero after inactivity, so users re-authenticate on next use). For always-on deployments, replace `_auth_codes`, `_access_tokens`, `_refresh_tokens`, and `_clients` with a Cloud Firestore or Redis backend in `server.py`.
+By default, tokens are stored in memory and lost when the server restarts (e.g., when Cloud Run recycles the container). To avoid having to log in manually after every restart, you can provide your credentials directly via environment variables.
+
+### How to configure:
+
+1.  **Set Environment Variables**:
+    *   `BABYBUDDY_INSTANCE`: Your full BabyBuddy URL (e.g., `https://your-instance.com/`)
+    *   `BABYBUDDY_TOKEN`: Your API token.
+
+2.  **Deploy with Variables**:
+    ```bash
+    gcloud run deploy babybuddy-mcp \
+      --source . \
+      --region $GCP_REGION \
+      --set-env-vars="BABYBUDDY_INSTANCE=$BABYBUDDY_INSTANCE,BABYBUDDY_TOKEN=$BABYBUDDY_TOKEN,SERVER_URL=$BABYBUDDY_INSTANCE_URL"
+    ```
+
+When these variables are set, the login page will automatically authenticate you and redirect back to Claude without showing any form.

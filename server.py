@@ -46,6 +46,10 @@ PORT       = int(os.environ.get("PORT", "8080"))
 SERVER_URL = os.environ.get("SERVER_URL", f"http://{HOST}:{PORT}")
 TOKEN_TTL  = int(os.environ.get("TOKEN_TTL", str(24 * 3600)))  # 24 h
 
+# Pre-shared secrets for auto-login (optional)
+AUTO_INSTANCE = os.environ.get("BABYBUDDY_INSTANCE")
+AUTO_TOKEN    = os.environ.get("BABYBUDDY_TOKEN")
+
 # ---------------------------------------------------------------------------
 # In-memory stores  (swap for a DB in production multi-user deployments)
 # ---------------------------------------------------------------------------
@@ -334,6 +338,11 @@ async def login_form(request: Request) -> Response:
 
     if state not in _pending_auth:
         return HTMLResponse("<h1>Invalid or expired state. Please restart the connection.</h1>", status_code=400)
+
+    # AUTO-LOGIN: If pre-shared secrets are set, skip the form and submit immediately
+    if AUTO_INSTANCE and AUTO_TOKEN:
+        return await _do_login(state, AUTO_INSTANCE.rstrip("/"), AUTO_TOKEN)
+
     return HTMLResponse(LOGIN_HTML.format(state=state, base_url="",
                                           error_display="none", error_msg=""))
 
@@ -344,7 +353,10 @@ async def login_submit(request: Request) -> Response:
     state     = str(form.get("state", ""))
     base_url  = str(form.get("base_url", "")).rstrip("/")
     api_token = str(form.get("api_token", ""))
+    return await _do_login(state, base_url, api_token)
 
+
+async def _do_login(state: str, base_url: str, api_token: str) -> Response:
     if state not in _pending_auth:
         return HTMLResponse("<h1>Invalid or expired state.</h1>", status_code=400)
 
@@ -360,8 +372,8 @@ async def login_submit(request: Request) -> Response:
     except Exception as exc:
         return HTMLResponse(
             LOGIN_HTML.format(state=state, base_url=base_url,
-                              error_display="block",
-                              error_msg=f"Could not connect: {exc}"),
+                               error_display="block",
+                               error_msg=f"Could not connect: {exc}"),
             status_code=200,
         )
 
