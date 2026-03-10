@@ -153,7 +153,7 @@ LOGIN_HTML = """\
   <div class="card">
     <div class="logo"><img src="/icon.png" alt="BabyBuddy MCP Icon"></div>
     <h1>BabyBuddy MCP</h1>
-    <p class="sub">Connect your BabyBuddy instance to Claude</p>
+    <p class="sub">Connect your BabyBuddy instance to your AI assistant</p>
     <div class="error">{error_msg}</div>
     <form method="POST" action="/oauth/login">
       <input type="hidden" name="state" value="{state}">
