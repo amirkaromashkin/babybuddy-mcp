@@ -32,6 +32,7 @@ from mcp.server.auth.provider import (
 )
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
+from mcp.types import Icon
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -301,6 +302,7 @@ if _mcp_url.startswith("http://"):
 mcp = FastMCP(
     "BabyBuddy",
     auth_server_provider=_oauth_provider,
+    icons=[Icon(src=f"{_mcp_url}/icon.png", media_type="image/png")],
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(_mcp_url),
         resource_server_url=AnyHttpUrl(_mcp_url),
