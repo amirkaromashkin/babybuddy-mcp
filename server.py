@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 BabyBuddy MCP Server
-- HTTP transport (Streamable-HTTP), runs on http://localhost:8080/mcp
-- OAuth 2.1 — users log in via a browser form once; no config files needed
-- General-purpose: works with any BabyBuddy instance, any number of children
+- Directly uses BABYBUDDY_INSTANCE and BABYBUDDY_TOKEN environment variables.
+- Simple and persistent: no login forms, no tokens, no 401s.
 """
 
 from __future__ import annotations
@@ -11,31 +10,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import secrets
-import time
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-import uvicorn
-from mcp.server.auth.middleware.auth_context import get_access_token
-from mcp.server.auth.provider import (
-    AccessToken,
-    AuthorizationCode,
-    AuthorizationParams,
-    OAuthAuthorizationServerProvider,
-    OAuthClientInformationFull,
-    OAuthToken,
-    RefreshToken,
-    TokenError,
-    construct_redirect_uri,
-)
-from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.types import Icon
-from pydantic import AnyHttpUrl
-from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -44,21 +24,16 @@ from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Re
 HOST       = os.environ.get("HOST", "localhost")
 PORT       = int(os.environ.get("PORT", "8080"))
 SERVER_URL = os.environ.get("SERVER_URL", f"http://{HOST}:{PORT}")
-TOKEN_TTL  = int(os.environ.get("TOKEN_TTL", str(24 * 3600)))  # 24 h
 
-# Pre-shared secrets for auto-login (optional)
-AUTO_INSTANCE = os.environ.get("BABYBUDDY_INSTANCE")
-AUTO_TOKEN    = os.environ.get("BABYBUDDY_TOKEN")
+# Mandatory credentials
+BABYBUDDY_INSTANCE = os.environ.get("BABYBUDDY_INSTANCE")
+BABYBUDDY_TOKEN    = os.environ.get("BABYBUDDY_TOKEN")
 
-# ---------------------------------------------------------------------------
-# In-memory stores  (swap for a DB in production multi-user deployments)
-# ---------------------------------------------------------------------------
-
-_auth_codes:    dict[str, tuple[AuthorizationCode, dict]] = {}
-_access_tokens: dict[str, tuple[AccessToken, dict]]       = {}
-_refresh_tokens: dict[str, tuple[RefreshToken, dict]]     = {}
-_pending_auth:  dict[str, tuple[OAuthClientInformationFull, AuthorizationParams]] = {}
-_clients:       dict[str, OAuthClientInformationFull]     = {}
+if not BABYBUDDY_INSTANCE or not BABYBUDDY_TOKEN:
+    import sys
+    print("CRITICAL ERROR: BABYBUDDY_INSTANCE and BABYBUDDY_TOKEN must be set.")
+    print("Please set them in your environment or .env file.")
+    sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # BabyBuddy API client
@@ -93,315 +68,13 @@ class BabyBuddyClient:
             r.raise_for_status()
 
 # ---------------------------------------------------------------------------
-# Session helpers
-# ---------------------------------------------------------------------------
-
-def _session(token: str) -> dict | None:
-    entry = _access_tokens.get(token)
-    if not entry:
-        return None
-    at, session = entry
-    if at.expires_at and at.expires_at < time.time():
-        del _access_tokens[token]
-        return None
-    return session
-
-
-def _client() -> BabyBuddyClient:
-    """Return a BabyBuddyClient for the currently authenticated request."""
-    at = get_access_token()
-    if at is None:
-        raise RuntimeError("Not authenticated — complete OAuth login first.")
-    sess = _session(at.token)
-    if sess is None:
-        raise RuntimeError("Session expired — please re-authenticate.")
-    return BabyBuddyClient(sess["base_url"], sess["api_token"])
-
-# ---------------------------------------------------------------------------
-# OAuth 2.1 Provider
-# ---------------------------------------------------------------------------
-
-LOGIN_HTML = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>BabyBuddy MCP — Sign In</title>
-  <style>
-    *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-          background:#f0f4f8;display:flex;align-items:center;
-          justify-content:center;min-height:100vh;padding:20px}}
-    .card{{background:#fff;border-radius:16px;padding:40px;
-           box-shadow:0 4px 24px rgba(0,0,0,.1);max-width:440px;width:100%}}
-    .logo{{text-align:center;margin-bottom:8px}}
-    .logo img{{width:80px;height:80px;border-radius:20%}}
-    h1{{text-align:center;font-size:22px;color:#1a202c;margin-bottom:4px}}
-    p.sub{{text-align:center;color:#718096;font-size:14px;margin-bottom:28px}}
-    label{{display:block;font-size:13px;font-weight:600;color:#4a5568;margin-bottom:6px}}
-    input{{width:100%;padding:10px 14px;border:1.5px solid #e2e8f0;
-           border-radius:8px;font-size:15px;transition:border .2s}}
-    input:focus{{outline:none;border-color:#667eea}}
-    .hint{{font-size:12px;color:#a0aec0;margin-top:4px}}
-    .field{{margin-bottom:18px}}
-    button{{width:100%;padding:12px;background:#667eea;color:#fff;
-            border:none;border-radius:8px;font-size:16px;font-weight:600;
-            cursor:pointer;transition:background .2s;margin-top:6px}}
-    button:hover{{background:#5a67d8}}
-    .error{{background:#fff5f5;border:1px solid #fc8181;border-radius:8px;
-            padding:10px 14px;color:#c53030;font-size:13px;
-            margin-bottom:16px;display:{error_display}}}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo"><img src="/icon.png" alt="BabyBuddy MCP Icon"></div>
-    <h1>BabyBuddy MCP</h1>
-    <p class="sub">Connect your BabyBuddy instance to your AI assistant</p>
-    <div class="error">{error_msg}</div>
-    <form method="POST" action="/oauth/login">
-      <input type="hidden" name="state" value="{state}">
-      <div class="field">
-        <label>BabyBuddy URL</label>
-        <input name="base_url" type="url"
-               placeholder="https://your-babybuddy.example.com"
-               value="{base_url}" required>
-        <div class="hint">The URL of your self-hosted BabyBuddy instance</div>
-      </div>
-      <div class="field">
-        <label>API Token</label>
-        <input name="api_token" type="password"
-               placeholder="Paste your API token" required>
-        <div class="hint">BabyBuddy → Settings → API → your token</div>
-      </div>
-      <button type="submit">Connect →</button>
-    </form>
-  </div>
-</body>
-</html>"""
-
-
-class BabyBuddyOAuthProvider(
-    OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]
-):
-    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return _clients.get(client_id)
-
-    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        _clients[client_info.client_id] = client_info
-
-    async def authorize(
-        self, client: OAuthClientInformationFull, params: AuthorizationParams
-    ) -> str:
-        state = secrets.token_urlsafe(16)
-        _pending_auth[state] = (client, params)
-        return f"{SERVER_URL}/oauth/login?state={state}"
-
-    async def load_authorization_code(
-        self, client: OAuthClientInformationFull, authorization_code: str
-    ) -> AuthorizationCode | None:
-        entry = _auth_codes.get(authorization_code)
-        if not entry:
-            return None
-        code, _ = entry
-        if code.expires_at < time.time():
-            del _auth_codes[authorization_code]
-            return None
-        return code
-
-    async def exchange_authorization_code(
-        self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
-    ) -> OAuthToken:
-        entry = _auth_codes.pop(authorization_code.code, None)
-        if not entry:
-            raise TokenError("invalid_grant")
-        _, session = entry
-
-        access  = secrets.token_urlsafe(32)
-        refresh = secrets.token_urlsafe(32)
-        exp     = int(time.time()) + TOKEN_TTL
-
-        _access_tokens[access] = (
-            AccessToken(token=access, client_id=client.client_id,
-                        scopes=authorization_code.scopes, expires_at=exp),
-            session,
-        )
-        _refresh_tokens[refresh] = (
-            RefreshToken(token=refresh, client_id=client.client_id,
-                         scopes=authorization_code.scopes, expires_at=exp + TOKEN_TTL),
-            session,
-        )
-        return OAuthToken(access_token=access, token_type="Bearer",
-                          expires_in=TOKEN_TTL, refresh_token=refresh,
-                          scope=" ".join(authorization_code.scopes))
-
-    async def load_refresh_token(
-        self, client: OAuthClientInformationFull, refresh_token: str
-    ) -> RefreshToken | None:
-        entry = _refresh_tokens.get(refresh_token)
-        if not entry:
-            return None
-        rt, _ = entry
-        if rt.expires_at and rt.expires_at < time.time():
-            del _refresh_tokens[refresh_token]
-            return None
-        return rt
-
-    async def exchange_refresh_token(
-        self,
-        client: OAuthClientInformationFull,
-        refresh_token: RefreshToken,
-        scopes: list[str],
-    ) -> OAuthToken:
-        old = _refresh_tokens.pop(refresh_token.token, None)
-        if not old:
-            raise TokenError("invalid_grant")
-        _, session = old
-        use_scopes = scopes or refresh_token.scopes
-
-        access  = secrets.token_urlsafe(32)
-        refresh = secrets.token_urlsafe(32)
-        exp     = int(time.time()) + TOKEN_TTL
-
-        _access_tokens[access] = (
-            AccessToken(token=access, client_id=client.client_id,
-                        scopes=use_scopes, expires_at=exp),
-            session,
-        )
-        _refresh_tokens[refresh] = (
-            RefreshToken(token=refresh, client_id=client.client_id,
-                         scopes=use_scopes, expires_at=exp + TOKEN_TTL),
-            session,
-        )
-        return OAuthToken(access_token=access, token_type="Bearer",
-                          expires_in=TOKEN_TTL, refresh_token=refresh,
-                          scope=" ".join(use_scopes))
-
-    async def load_access_token(self, token: str) -> AccessToken | None:
-        entry = _access_tokens.get(token)
-        if not entry:
-            return None
-        at, _ = entry
-        if at.expires_at and at.expires_at < time.time():
-            del _access_tokens[token]
-            return None
-        return at
-
-    async def revoke_token(self, token: str, token_type_hint: str | None = None) -> None:
-        _access_tokens.pop(token, None)
-        _refresh_tokens.pop(token, None)
-
-# ---------------------------------------------------------------------------
-# FastMCP server
-# ---------------------------------------------------------------------------
-
-_oauth_provider = BabyBuddyOAuthProvider()
-
-# Ensure metadata URLs are HTTPS (FastMCP / OAuth 2.1 requirement)
-_mcp_url = SERVER_URL
-if _mcp_url.startswith("http://"):
-    _mcp_url = _mcp_url.replace("http://", "https://", 1)
-
-mcp = FastMCP(
-    "BabyBuddy",
-    auth_server_provider=_oauth_provider,
-    icons=[Icon(src=f"{_mcp_url}/icon.png", media_type="image/png")],
-    auth=AuthSettings(
-        issuer_url=AnyHttpUrl(_mcp_url),
-        resource_server_url=AnyHttpUrl(_mcp_url),
-        client_registration_options=ClientRegistrationOptions(
-            enabled=True,
-            valid_scopes=["babybuddy"],
-            default_scopes=["babybuddy"],
-        ),
-    ),
-    host=HOST,
-    port=PORT,
-)
-
-# ---------------------------------------------------------------------------
-# Login form — custom routes added to the Starlette app
-# ---------------------------------------------------------------------------
-
-@mcp.custom_route("/icon.png", methods=["GET"])
-async def get_icon(request: Request) -> Response:
-    return FileResponse("icon.png")
-
-@mcp.custom_route("/oauth/login", methods=["GET"])
-async def login_form(request: Request) -> Response:
-    state = request.query_params.get("state", "")
-    # Allow a preview mode for the user to check the UI/Icon 
-    if state == "preview":
-        return HTMLResponse(LOGIN_HTML.format(state="preview", base_url="",
-                                              error_display="none", error_msg=""))
-
-    if state not in _pending_auth:
-        return HTMLResponse("<h1>Invalid or expired state. Please restart the connection.</h1>", status_code=400)
-
-    # AUTO-LOGIN: If pre-shared secrets are set, skip the form and submit immediately
-    if AUTO_INSTANCE and AUTO_TOKEN:
-        return await _do_login(state, AUTO_INSTANCE.rstrip("/"), AUTO_TOKEN)
-
-    return HTMLResponse(LOGIN_HTML.format(state=state, base_url="",
-                                          error_display="none", error_msg=""))
-
-
-@mcp.custom_route("/oauth/login", methods=["POST"])
-async def login_submit(request: Request) -> Response:
-    form  = await request.form()
-    state     = str(form.get("state", ""))
-    base_url  = str(form.get("base_url", "")).rstrip("/")
-    api_token = str(form.get("api_token", ""))
-    return await _do_login(state, base_url, api_token)
-
-
-async def _do_login(state: str, base_url: str, api_token: str) -> Response:
-    if state not in _pending_auth:
-        return HTMLResponse("<h1>Invalid or expired state.</h1>", status_code=400)
-
-    # Validate the token against BabyBuddy
-    try:
-        async with httpx.AsyncClient() as hc:
-            r = await hc.get(
-                f"{base_url}/api/children/",
-                headers={"Authorization": f"Token {api_token}", "Accept": "application/json"},
-                timeout=10,
-            )
-            r.raise_for_status()
-    except Exception as exc:
-        return HTMLResponse(
-            LOGIN_HTML.format(state=state, base_url=base_url,
-                               error_display="block",
-                               error_msg=f"Could not connect: {exc}"),
-            status_code=200,
-        )
-
-    client, auth_params = _pending_auth.pop(state)
-    session = {"base_url": base_url, "api_token": api_token}
-
-    code = secrets.token_urlsafe(32)
-    _auth_codes[code] = (
-        AuthorizationCode(
-            code=code,
-            scopes=auth_params.scopes or ["babybuddy"],
-            expires_at=time.time() + 300,
-            client_id=client.client_id,
-            code_challenge=auth_params.code_challenge,
-            redirect_uri=auth_params.redirect_uri,
-            redirect_uri_provided_explicitly=auth_params.redirect_uri_provided_explicitly,
-        ),
-        session,
-    )
-
-    redirect_url = construct_redirect_uri(
-        str(auth_params.redirect_uri), code=code, state=auth_params.state
-    )
-    return RedirectResponse(redirect_url, status_code=302)
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _client() -> BabyBuddyClient:
+    """Return a BabyBuddyClient using configured environment variables."""
+    # Note: Validation happens at startup, so these are guaranteed to exist here.
+    return BabyBuddyClient(BABYBUDDY_INSTANCE, BABYBUDDY_TOKEN)
 
 def _fmt(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
@@ -411,6 +84,17 @@ def _now() -> str:
 
 def _today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+# ---------------------------------------------------------------------------
+# FastMCP server
+# ---------------------------------------------------------------------------
+
+mcp = FastMCP(
+    "BabyBuddy",
+    icons=[Icon(src=f"{SERVER_URL}/icon.png", media_type="image/png")],
+    host=HOST,
+    port=PORT,
+)
 
 # ---------------------------------------------------------------------------
 # Tools — Children
@@ -457,6 +141,13 @@ async def get_feedings(child: int, limit: int = 10) -> str:
     return _fmt(await _client().get("/feedings/",
         {"child": child, "limit": limit, "ordering": "-start"}))
 
+
+@mcp.tool()
+async def delete_feeding(feeding_id: int) -> str:
+    """Delete a feeding session by ID."""
+    await _client().delete(f"/feedings/{feeding_id}/")
+    return _fmt({"deleted": True, "feeding_id": feeding_id})
+
 # ---------------------------------------------------------------------------
 # Tools — Sleep
 # ---------------------------------------------------------------------------
@@ -485,6 +176,13 @@ async def get_sleep(child: int, limit: int = 10) -> str:
     """Get recent sleep sessions for a child."""
     return _fmt(await _client().get("/sleep/",
         {"child": child, "limit": limit, "ordering": "-start"}))
+
+
+@mcp.tool()
+async def delete_sleep(sleep_id: int) -> str:
+    """Delete a sleep session by ID."""
+    await _client().delete(f"/sleep/{sleep_id}/")
+    return _fmt({"deleted": True, "sleep_id": sleep_id})
 
 # ---------------------------------------------------------------------------
 # Tools — Diaper Changes
@@ -521,6 +219,13 @@ async def get_diaper_changes(child: int, limit: int = 10) -> str:
     return _fmt(await _client().get("/changes/",
         {"child": child, "limit": limit, "ordering": "-time"}))
 
+
+@mcp.tool()
+async def delete_diaper_change(change_id: int) -> str:
+    """Delete a diaper change by ID."""
+    await _client().delete(f"/changes/{change_id}/")
+    return _fmt({"deleted": True, "change_id": change_id})
+
 # ---------------------------------------------------------------------------
 # Tools — Temperature
 # ---------------------------------------------------------------------------
@@ -543,6 +248,13 @@ async def get_temperature(child: int, limit: int = 10) -> str:
     """Get recent temperature readings for a child."""
     return _fmt(await _client().get("/temperature/",
         {"child": child, "limit": limit, "ordering": "-time"}))
+
+
+@mcp.tool()
+async def delete_temperature(temperature_id: int) -> str:
+    """Delete a temperature reading by ID."""
+    await _client().delete(f"/temperature/{temperature_id}/")
+    return _fmt({"deleted": True, "temperature_id": temperature_id})
 
 # ---------------------------------------------------------------------------
 # Tools — Weight
@@ -567,6 +279,13 @@ async def get_weight(child: int, limit: int = 10) -> str:
     return _fmt(await _client().get("/weight/",
         {"child": child, "limit": limit, "ordering": "-date"}))
 
+
+@mcp.tool()
+async def delete_weight(weight_id: int) -> str:
+    """Delete a weight measurement by ID."""
+    await _client().delete(f"/weight/{weight_id}/")
+    return _fmt({"deleted": True, "weight_id": weight_id})
+
 # ---------------------------------------------------------------------------
 # Tools — Height
 # ---------------------------------------------------------------------------
@@ -589,6 +308,13 @@ async def get_height(child: int, limit: int = 10) -> str:
     """Get height history for a child."""
     return _fmt(await _client().get("/height/",
         {"child": child, "limit": limit, "ordering": "-date"}))
+
+
+@mcp.tool()
+async def delete_height(height_id: int) -> str:
+    """Delete a height measurement by ID."""
+    await _client().delete(f"/height/{height_id}/")
+    return _fmt({"deleted": True, "height_id": height_id})
 
 # ---------------------------------------------------------------------------
 # Tools — Head Circumference
@@ -614,6 +340,13 @@ async def get_head_circumference(child: int, limit: int = 10) -> str:
     return _fmt(await _client().get("/head-circumference/",
         {"child": child, "limit": limit, "ordering": "-date"}))
 
+
+@mcp.tool()
+async def delete_head_circumference(head_circumference_id: int) -> str:
+    """Delete a head circumference measurement by ID."""
+    await _client().delete(f"/head-circumference/{head_circumference_id}/")
+    return _fmt({"deleted": True, "head_circumference_id": head_circumference_id})
+
 # ---------------------------------------------------------------------------
 # Tools — Pumping
 # ---------------------------------------------------------------------------
@@ -637,6 +370,13 @@ async def get_pumping(child: int, limit: int = 10) -> str:
     return _fmt(await _client().get("/pumping/",
         {"child": child, "limit": limit, "ordering": "-time"}))
 
+
+@mcp.tool()
+async def delete_pumping(pumping_id: int) -> str:
+    """Delete a pumping session by ID."""
+    await _client().delete(f"/pumping/{pumping_id}/")
+    return _fmt({"deleted": True, "pumping_id": pumping_id})
+
 # ---------------------------------------------------------------------------
 # Tools — Notes
 # ---------------------------------------------------------------------------
@@ -653,6 +393,13 @@ async def get_notes(child: int, limit: int = 10) -> str:
     """Get recent notes for a child."""
     return _fmt(await _client().get("/notes/",
         {"child": child, "limit": limit, "ordering": "-time"}))
+
+
+@mcp.tool()
+async def delete_note(note_id: int) -> str:
+    """Delete a note by ID."""
+    await _client().delete(f"/notes/{note_id}/")
+    return _fmt({"deleted": True, "note_id": note_id})
 
 # ---------------------------------------------------------------------------
 # Tools — Timers
@@ -721,7 +468,6 @@ async def get_daily_summary(child: int, date: str | None = None) -> str:
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"🍼  BabyBuddy MCP starting — binding {HOST}:{PORT}")
-    print(f"    MCP endpoint : {SERVER_URL}/mcp")
-    print(f"    OAuth login  : {SERVER_URL}/oauth/login")
+    print(f"🍼 BabyBuddy MCP starting — binding {HOST}:{PORT}")
+    print(f"    Direct API authentication active.")
     uvicorn.run(mcp.streamable_http_app(), host=HOST, port=PORT)
